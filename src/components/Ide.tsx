@@ -2,6 +2,7 @@
 
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { CodeEditor } from "@/components/CodeEditor";
 import { LogoMark } from "@/components/LogoMark";
 import { PreviewFrame } from "@/components/PreviewFrame";
@@ -27,7 +28,7 @@ const VIEWPORTS: { id: Viewport; label: string; width: string }[] = [
 ];
 
 function useDesktopLayout() {
-  const [isDesktop, setIsDesktop] = useState(true);
+  const [isDesktop, setIsDesktop] = useState(false);
 
   useEffect(() => {
     const media = window.matchMedia("(min-width: 960px)");
@@ -49,6 +50,7 @@ export function Ide() {
   const [tab, setTab] = useState<MobileTab>("html");
   const [toast, setToast] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isDesktop = useDesktopLayout();
 
@@ -110,11 +112,14 @@ export function Ide() {
   }, [html, css, liveCss, mode, showToast, openLivePage]);
 
   useEffect(() => {
-    if (!menuOpen) return;
-    const close = () => setMenuOpen(false);
+    if (!menuOpen && !moreOpen) return;
+    const close = () => {
+      setMenuOpen(false);
+      setMoreOpen(false);
+    };
     window.addEventListener("click", close);
     return () => window.removeEventListener("click", close);
-  }, [menuOpen]);
+  }, [menuOpen, moreOpen]);
 
   const previewWidth = useMemo(
     () => VIEWPORTS.find((item) => item.id === viewport)?.width ?? "100%",
@@ -155,6 +160,7 @@ export function Ide() {
       "text/html;charset=utf-8",
     );
     setMenuOpen(false);
+    setMoreOpen(false);
     showToast("index.html téléchargé");
   };
 
@@ -168,6 +174,7 @@ export function Ide() {
       downloadFile("styles.css", css, "text/css;charset=utf-8");
     }
     setMenuOpen(false);
+    setMoreOpen(false);
     showToast("HTML et CSS téléchargés");
   };
 
@@ -216,7 +223,7 @@ export function Ide() {
     <div className="ide-shell">
       <header className="ide-topbar">
         <div className="brand">
-          <LogoMark size={32} />
+          <LogoMark size={isDesktop ? 32 : 24} />
           <div>
             <p className="brand-name">
               <span className="brand-ide">IDE</span> Claude
@@ -229,7 +236,19 @@ export function Ide() {
           </span>
         </div>
 
-        <div className="topbar-actions">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".html,.htm,.css,text/html,text/css"
+          multiple
+          hidden
+          onChange={(event) => {
+            void importFiles(event.target.files);
+            event.target.value = "";
+          }}
+        />
+
+        <div className="topbar-actions desktop-only">
           <div className="viewport-switch file-mode-switch" role="group" aria-label="Type de fichier">
             <button
               type="button"
@@ -259,18 +278,6 @@ export function Ide() {
               </button>
             ))}
           </div>
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".html,.htm,.css,text/html,text/css"
-            multiple
-            hidden
-            onChange={(event) => {
-              void importFiles(event.target.files);
-              event.target.value = "";
-            }}
-          />
 
           <button type="button" className="ghost-btn" onClick={openLivePage}>
             Ouvrir l’aperçu
@@ -307,6 +314,19 @@ export function Ide() {
             Réinitialiser
           </button>
         </div>
+
+        <button
+          type="button"
+          className="ghost-btn icon-btn mobile-only"
+          aria-label="Menu"
+          aria-expanded={moreOpen}
+          onClick={(event) => {
+            event.stopPropagation();
+            setMoreOpen((open) => !open);
+          }}
+        >
+          Menu
+        </button>
       </header>
 
       {!isDesktop ? (
@@ -340,17 +360,18 @@ export function Ide() {
         ) : (
           <div className="mobile-stage">
             {tab === "html" ? (
-              <EditorPane language="html" value={html} onChange={setHtml} mode={mode} />
+              <EditorPane language="html" value={html} onChange={setHtml} mode={mode} touch />
             ) : null}
             {tab === "css" && mode === "split" ? (
-              <EditorPane language="css" value={css} onChange={setCss} />
+              <EditorPane language="css" value={css} onChange={setCss} touch />
             ) : null}
             {tab === "preview" ? (
               <PreviewPane
                 html={html}
                 css={liveCss}
-                width={previewWidth}
+                width="100%"
                 onOpenPreview={openLivePage}
+                touch
               />
             ) : null}
           </div>
@@ -358,18 +379,102 @@ export function Ide() {
       </main>
 
       <footer className="ide-status">
-        <span>Sauvegarde automatique</span>
+        <span>Sauvegarde auto</span>
         <span className="status-sep" />
-        <span>HTML {html.length} car.</span>
-        <span className="status-sep" />
-        <span>{mode === "single" ? "CSS intégré au HTML" : `CSS ${css.length} car.`}</span>
-        <span className="status-sep" />
-        <span>Ctrl/⌘ + S pour forcer</span>
-        <span className="status-sep" />
-        <span>Ctrl/⌘ + Shift + Entrée : aperçu</span>
+        <span>HTML {html.length}</span>
+        {mode === "split" ? (
+          <>
+            <span className="status-sep" />
+            <span>CSS {css.length}</span>
+          </>
+        ) : (
+          <>
+            <span className="status-sep desktop-only" />
+            <span className="desktop-only">CSS intégré</span>
+          </>
+        )}
+        <span className="status-sep desktop-only" />
+        <span className="desktop-only">Ctrl/⌘ + S</span>
+        <span className="status-sep desktop-only" />
+        <span className="desktop-only">Ctrl/⌘ + Shift + Entrée : aperçu</span>
       </footer>
 
       {toast ? <div className="toast">{toast}</div> : null}
+
+      {moreOpen
+        ? createPortal(
+            <div
+              className="mobile-overlay"
+              onClick={() => setMoreOpen(false)}
+            >
+              <div
+                className="menu mobile-sheet"
+                role="menu"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <p className="mobile-sheet-title">Menu</p>
+                <button
+                  type="button"
+                  className={mode === "split" ? "is-active" : ""}
+                  onClick={() => {
+                    setFileMode("split");
+                    setMoreOpen(false);
+                  }}
+                >
+                  Mode HTML + CSS
+                </button>
+                <button
+                  type="button"
+                  className={mode === "single" ? "is-active" : ""}
+                  onClick={() => {
+                    setFileMode("single");
+                    setMoreOpen(false);
+                  }}
+                >
+                  Mode HTML intégré
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    openLivePage();
+                    setMoreOpen(false);
+                  }}
+                >
+                  Ouvrir l’aperçu
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    fileInputRef.current?.click();
+                    setMoreOpen(false);
+                  }}
+                >
+                  Importer
+                </button>
+                <button type="button" onClick={downloadComplete}>
+                  Télécharger la page
+                </button>
+                <button type="button" onClick={downloadSplit}>
+                  Télécharger HTML + CSS
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => {
+                    reset();
+                    setMoreOpen(false);
+                  }}
+                >
+                  Réinitialiser
+                </button>
+                <button type="button" onClick={() => setMoreOpen(false)}>
+                  Fermer
+                </button>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
@@ -428,11 +533,13 @@ function EditorPane({
   value,
   onChange,
   mode = "split",
+  touch = false,
 }: {
   language: "html" | "css";
   value: string;
   onChange: (value: string) => void;
   mode?: FileMode;
+  touch?: boolean;
 }) {
   const hint =
     language === "css"
@@ -448,7 +555,7 @@ function EditorPane({
         <span className="pane-hint">{hint}</span>
       </div>
       <div className="pane-body">
-        <CodeEditor language={language} value={value} onChange={onChange} />
+        <CodeEditor language={language} value={value} onChange={onChange} touch={touch} />
       </div>
     </section>
   );
@@ -459,11 +566,13 @@ function PreviewPane({
   css,
   width,
   onOpenPreview,
+  touch = false,
 }: {
   html: string;
   css: string;
   width: string;
   onOpenPreview: () => void;
+  touch?: boolean;
 }) {
   return (
     <section className="pane preview-pane">
@@ -474,7 +583,7 @@ function PreviewPane({
         </button>
       </div>
       <div className="pane-body preview-body">
-        <PreviewFrame html={html} css={css} width={width} />
+        <PreviewFrame html={html} css={css} width={width} variant={touch ? "page" : "stage"} />
       </div>
     </section>
   );
