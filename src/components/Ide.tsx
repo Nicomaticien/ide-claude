@@ -1,11 +1,11 @@
 "use client";
 
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { CodeEditor } from "@/components/CodeEditor";
 import { LogoMark } from "@/components/LogoMark";
-import { PreviewFrame } from "@/components/PreviewFrame";
+import { PreviewFrame, type PreviewInspectHandle } from "@/components/PreviewFrame";
 import {
   composeDocument,
   extractEmbeddedCss,
@@ -13,6 +13,15 @@ import {
   previewCssForMode,
   type FileMode,
 } from "@/lib/compose";
+import {
+  linkKey,
+  resolveHover,
+  type HighlightRequest,
+  type HoverTarget,
+  type InspectLink,
+  type InspectMark,
+} from "@/lib/inspect-link";
+import { buildInspectModel, lineOf, type InspectModel } from "@/lib/inspect-map";
 import { downloadFile } from "@/lib/download";
 import { loadProject, saveProject } from "@/lib/storage";
 import { STARTER_CSS, STARTER_HTML } from "@/lib/starter";
@@ -20,6 +29,8 @@ import { openPreviewWindow, publishPreview } from "@/lib/sync";
 
 type Viewport = "fluid" | "tablet" | "mobile";
 type MobileTab = "html" | "css" | "preview";
+
+const NO_MARKS: InspectMark[] = [];
 
 const VIEWPORTS: { id: Viewport; label: string; width: string }[] = [
   { id: "fluid", label: "Desktop", width: "100%" },
@@ -51,7 +62,14 @@ export function Ide() {
   const [toast, setToast] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [inspect, setInspect] = useState(true);
+  const [link, setLink] = useState<InspectLink | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const previewRef = useRef<PreviewInspectHandle>(null);
+  const inspectRef = useRef(inspect);
+  const sourcesRef = useRef({ html, css, mode });
+  const lastHtmlLine = useRef<number | null>(null);
+  const lastCssLine = useRef<number | null>(null);
   const isDesktop = useDesktopLayout();
 
   useEffect(() => {
@@ -82,6 +100,107 @@ export function Ide() {
   }, []);
 
   const liveCss = previewCssForMode(mode, css);
+  const inspectModel = useMemo(
+    () => buildInspectModel(html, mode === "split" ? css : ""),
+    [html, css, mode],
+  );
+
+  useEffect(() => {
+    inspectRef.current = inspect;
+    sourcesRef.current = { html, css, mode };
+    lastHtmlLine.current = null;
+    lastCssLine.current = null;
+  }, [inspect, html, css, mode]);
+
+  const currentModel = useCallback((): InspectModel => {
+    const sources = sourcesRef.current;
+    return buildInspectModel(sources.html, sources.mode === "split" ? sources.css : "");
+  }, []);
+
+  const publishHover = useCallback((target: HoverTarget | null, origin: HoverTarget["from"]) => {
+    if (!inspectRef.current || !target) {
+      setLink((current) => (current?.origin === origin ? null : current));
+      return;
+    }
+    const next = resolveHover(currentModel(), target, previewRef.current);
+    setLink((current) => (linkKey(current) === linkKey(next) ? current : next));
+  }, [currentModel]);
+
+  const onHtmlHover = useCallback((offset: number | null) => {
+    if (offset == null) {
+      lastHtmlLine.current = null;
+      publishHover(null, "html");
+      return;
+    }
+    const model = currentModel();
+    const line = lineOf(model.htmlSource, offset);
+    if (lastHtmlLine.current === line) return;
+    lastHtmlLine.current = line;
+    publishHover({ from: "html", offset }, "html");
+  }, [currentModel, publishHover]);
+
+  const onCssHover = useCallback((offset: number | null) => {
+    if (offset == null) {
+      lastCssLine.current = null;
+      publishHover(null, "css");
+      return;
+    }
+    const model = currentModel();
+    const line = lineOf(model.cssSource, offset);
+    if (lastCssLine.current === line) return;
+    lastCssLine.current = line;
+    publishHover({ from: "css", offset }, "css");
+  }, [currentModel, publishHover]);
+
+  const onPreviewHover = useCallback((nodeId: number | null) => {
+    publishHover(nodeId == null ? null : { from: "preview", nodeId }, "preview");
+  }, [publishHover]);
+
+  const [jump, setJump] = useState<{ html: number | null; css: number | null; token: number } | null>(null);
+
+  const clearInspectLink = useCallback(() => {
+    lastHtmlLine.current = null;
+    lastCssLine.current = null;
+    setLink((current) => (current === null ? current : null));
+    setJump(null);
+  }, []);
+
+  const toggleInspect = useCallback(() => {
+    setInspect((value) => !value);
+    clearInspectLink();
+  }, [clearInspectLink]);
+
+  const onPreviewClick = useCallback((nodeId: number) => {
+    if (!inspectRef.current) return;
+    const next = resolveHover(currentModel(), { from: "preview", nodeId }, previewRef.current);
+    setLink((current) => (linkKey(current) === linkKey(next) ? current : next));
+    if (!next) return;
+    setJump({ html: next.scrollHtml, css: next.scrollCss, token: Date.now() });
+    if (!isDesktop) {
+      if (next.scrollHtml != null) setTab("html");
+      else if (next.scrollCss != null) setTab("css");
+    }
+  }, [currentModel, isDesktop]);
+
+  const editHtml = useCallback((value: string) => {
+    sourcesRef.current = { ...sourcesRef.current, html: value };
+    setHtml(value);
+    clearInspectLink();
+  }, [clearInspectLink]);
+
+  const editCss = useCallback((value: string) => {
+    sourcesRef.current = { ...sourcesRef.current, css: value };
+    setCss(value);
+    clearInspectLink();
+  }, [clearInspectLink]);
+
+  const htmlMarks = inspect && link ? link.htmlMarks : NO_MARKS;
+  const cssMarks = inspect && link ? link.cssMarks : NO_MARKS;
+  const highlight = useMemo<HighlightRequest | null>(() => {
+    if (!inspect || !link) return null;
+    if (link.primaryId == null && !link.selector) return null;
+    return { primaryId: link.primaryId, selector: link.selector };
+  }, [inspect, link]);
 
   const openLivePage = useCallback(() => {
     saveProject(html, css, mode);
@@ -106,10 +225,14 @@ export function Ide() {
         event.preventDefault();
         openLivePage();
       }
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "e") {
+        event.preventDefault();
+        toggleInspect();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [html, css, liveCss, mode, showToast, openLivePage]);
+  }, [html, css, liveCss, mode, showToast, openLivePage, toggleInspect]);
 
   useEffect(() => {
     if (!menuOpen && !moreOpen) return;
@@ -133,6 +256,7 @@ export function Ide() {
     setHtml(STARTER_HTML);
     setCss(STARTER_CSS);
     setMode("split");
+    clearInspectLink();
     showToast("Projet réinitialisé");
   };
 
@@ -143,6 +267,7 @@ export function Ide() {
       setCss("");
       setMode("single");
       if (tab === "css") setTab("html");
+      clearInspectLink();
       showToast("Mode fichier unique : le CSS est dans le HTML");
       return;
     }
@@ -150,6 +275,7 @@ export function Ide() {
     setHtml(extracted.html);
     setCss(extracted.css);
     setMode("split");
+    clearInspectLink();
     showToast("Mode HTML + CSS séparés");
   };
 
@@ -190,6 +316,7 @@ export function Ide() {
       setHtml(htmlText);
       setCss(cssText);
       setMode("split");
+      clearInspectLink();
       showToast("HTML et CSS importés");
       return;
     }
@@ -202,6 +329,7 @@ export function Ide() {
         setCss(cssText);
         showToast("Fichier CSS importé");
       }
+      clearInspectLink();
       return;
     }
 
@@ -216,6 +344,7 @@ export function Ide() {
         setHtml(htmlText);
         showToast("Fichier HTML importé");
       }
+      clearInspectLink();
     }
   };
 
@@ -353,25 +482,64 @@ export function Ide() {
             css={css}
             mode={mode}
             previewWidth={previewWidth}
-            onHtmlChange={setHtml}
-            onCssChange={setCss}
+            onHtmlChange={editHtml}
+            onCssChange={editCss}
             onOpenPreview={openLivePage}
+            inspect={inspect}
+            onToggleInspect={toggleInspect}
+            previewRef={previewRef}
+            highlight={highlight}
+            onPreviewHover={onPreviewHover}
+            onPreviewClick={onPreviewClick}
+            htmlMarks={htmlMarks}
+            cssMarks={cssMarks}
+            jump={jump}
+            onHtmlHover={onHtmlHover}
+            onCssHover={onCssHover}
+            stampedHtml={inspectModel.stampedHtml}
           />
         ) : (
           <div className="mobile-stage">
             {tab === "html" ? (
-              <EditorPane language="html" value={html} onChange={setHtml} mode={mode} touch />
+              <EditorPane
+                language="html"
+                value={html}
+                onChange={editHtml}
+                mode={mode}
+                touch
+                inspectMarks={htmlMarks}
+                jumpLine={jump?.html ?? null}
+                jumpToken={jump?.token ?? null}
+                jumpFocus={jump?.html != null}
+                onHoverOffset={inspect ? onHtmlHover : undefined}
+              />
             ) : null}
             {tab === "css" && mode === "split" ? (
-              <EditorPane language="css" value={css} onChange={setCss} touch />
+              <EditorPane
+                language="css"
+                value={css}
+                onChange={editCss}
+                touch
+                inspectMarks={cssMarks}
+                jumpLine={jump?.css ?? null}
+                jumpToken={jump?.token ?? null}
+                jumpFocus={jump?.html == null && jump?.css != null}
+                onHoverOffset={inspect ? onCssHover : undefined}
+              />
             ) : null}
             {tab === "preview" ? (
               <PreviewPane
-                html={html}
+                html={inspectModel.stampedHtml}
                 css={liveCss}
                 width="100%"
                 onOpenPreview={openLivePage}
                 touch
+                inspect={inspect}
+                onToggleInspect={toggleInspect}
+                previewRef={previewRef}
+                highlight={highlight}
+                onPreviewHover={onPreviewHover}
+                onPreviewClick={onPreviewClick}
               />
             ) : null}
           </div>
@@ -397,6 +565,14 @@ export function Ide() {
         <span className="desktop-only">Ctrl/⌘ + S</span>
         <span className="status-sep desktop-only" />
         <span className="desktop-only">Ctrl/⌘ + Shift + Entrée : aperçu</span>
+        <span className="status-sep desktop-only" />
+        <span className="desktop-only">Ctrl/⌘ + Shift + E : inspecter</span>
+        {inspect ? (
+          <>
+            <span className="status-sep desktop-only" />
+            <span className="desktop-only">Clic dans l’aperçu : aller au code</span>
+          </>
+        ) : null}
       </footer>
 
       {toast ? <div className="toast">{toast}</div> : null}
@@ -467,6 +643,16 @@ export function Ide() {
                 >
                   Réinitialiser
                 </button>
+                <button
+                  type="button"
+                  className={inspect ? "is-active" : ""}
+                  onClick={() => {
+                    toggleInspect();
+                    setMoreOpen(false);
+                  }}
+                >
+                  {inspect ? "Couper l’inspecteur" : "Activer l’inspecteur"}
+                </button>
                 <button type="button" onClick={() => setMoreOpen(false)}>
                   Fermer
                 </button>
@@ -487,6 +673,18 @@ function DesktopWorkspace({
   onHtmlChange,
   onCssChange,
   onOpenPreview,
+  inspect,
+  onToggleInspect,
+  previewRef,
+  highlight,
+  onPreviewHover,
+  onPreviewClick,
+  htmlMarks,
+  cssMarks,
+  jump,
+  onHtmlHover,
+  onCssHover,
+  stampedHtml,
 }: {
   html: string;
   css: string;
@@ -495,6 +693,18 @@ function DesktopWorkspace({
   onHtmlChange: (value: string) => void;
   onCssChange: (value: string) => void;
   onOpenPreview: () => void;
+  inspect: boolean;
+  onToggleInspect: () => void;
+  previewRef: RefObject<PreviewInspectHandle | null>;
+  highlight: HighlightRequest | null;
+  onPreviewHover: (nodeId: number | null) => void;
+  onPreviewClick: (nodeId: number) => void;
+  htmlMarks: InspectMark[];
+  cssMarks: InspectMark[];
+  jump: { html: number | null; css: number | null; token: number } | null;
+  onHtmlHover: (offset: number | null) => void;
+  onCssHover: (offset: number | null) => void;
+  stampedHtml: string;
 }) {
   const liveCss = previewCssForMode(mode, css);
 
@@ -502,15 +712,43 @@ function DesktopWorkspace({
     <Group id="ide-claude-h" orientation="horizontal" className="h-full">
       <Panel id="editors" defaultSize="46%" minSize="24%">
         {mode === "single" ? (
-          <EditorPane language="html" value={html} onChange={onHtmlChange} mode={mode} />
+          <EditorPane
+            language="html"
+            value={html}
+            onChange={onHtmlChange}
+            mode={mode}
+            inspectMarks={htmlMarks}
+            jumpLine={jump?.html ?? null}
+            jumpToken={jump?.token ?? null}
+            jumpFocus={jump?.html != null}
+            onHoverOffset={inspect ? onHtmlHover : undefined}
+          />
         ) : (
           <Group id="ide-claude-v" orientation="vertical" className="h-full">
             <Panel id="html" defaultSize="55%" minSize="20%">
-              <EditorPane language="html" value={html} onChange={onHtmlChange} />
+              <EditorPane
+                language="html"
+                value={html}
+                onChange={onHtmlChange}
+                inspectMarks={htmlMarks}
+                jumpLine={jump?.html ?? null}
+                jumpToken={jump?.token ?? null}
+                jumpFocus={jump?.html != null}
+                onHoverOffset={inspect ? onHtmlHover : undefined}
+              />
             </Panel>
             <Separator className="resize-h" />
             <Panel id="css" defaultSize="45%" minSize="20%">
-              <EditorPane language="css" value={css} onChange={onCssChange} />
+              <EditorPane
+                language="css"
+                value={css}
+                onChange={onCssChange}
+                inspectMarks={cssMarks}
+                jumpLine={jump?.css ?? null}
+                jumpToken={jump?.token ?? null}
+                jumpFocus={false}
+                onHoverOffset={inspect ? onCssHover : undefined}
+              />
             </Panel>
           </Group>
         )}
@@ -518,10 +756,16 @@ function DesktopWorkspace({
       <Separator className="resize-v" />
       <Panel id="preview" defaultSize="54%" minSize="28%">
         <PreviewPane
-          html={html}
+          html={stampedHtml}
           css={liveCss}
           width={previewWidth}
           onOpenPreview={onOpenPreview}
+          inspect={inspect}
+          onToggleInspect={onToggleInspect}
+          previewRef={previewRef}
+          highlight={highlight}
+          onPreviewHover={onPreviewHover}
+          onPreviewClick={onPreviewClick}
         />
       </Panel>
     </Group>
@@ -534,12 +778,22 @@ function EditorPane({
   onChange,
   mode = "split",
   touch = false,
+  inspectMarks = NO_MARKS,
+  jumpLine = null,
+  jumpToken = null,
+  jumpFocus = false,
+  onHoverOffset,
 }: {
   language: "html" | "css";
   value: string;
   onChange: (value: string) => void;
   mode?: FileMode;
   touch?: boolean;
+  inspectMarks?: InspectMark[];
+  jumpLine?: number | null;
+  jumpToken?: number | null;
+  jumpFocus?: boolean;
+  onHoverOffset?: (offset: number | null) => void;
 }) {
   const hint =
     language === "css"
@@ -555,7 +809,17 @@ function EditorPane({
         <span className="pane-hint">{hint}</span>
       </div>
       <div className="pane-body">
-        <CodeEditor language={language} value={value} onChange={onChange} touch={touch} />
+        <CodeEditor
+          language={language}
+          value={value}
+          onChange={onChange}
+          touch={touch}
+          inspectMarks={inspectMarks}
+          jumpLine={jumpLine}
+          jumpToken={jumpToken}
+          jumpFocus={jumpFocus}
+          onHoverOffset={onHoverOffset}
+        />
       </div>
     </section>
   );
@@ -567,23 +831,59 @@ function PreviewPane({
   width,
   onOpenPreview,
   touch = false,
+  inspect = false,
+  onToggleInspect,
+  previewRef,
+  highlight = null,
+  onPreviewHover,
+  onPreviewClick,
 }: {
   html: string;
   css: string;
   width: string;
   onOpenPreview: () => void;
   touch?: boolean;
+  inspect?: boolean;
+  onToggleInspect?: () => void;
+  previewRef?: RefObject<PreviewInspectHandle | null>;
+  highlight?: HighlightRequest | null;
+  onPreviewHover?: (nodeId: number | null) => void;
+  onPreviewClick?: (nodeId: number) => void;
 }) {
   return (
     <section className="pane preview-pane">
       <div className="pane-header">
         <span className="lang-pill preview">Aperçu</span>
-        <button type="button" className="pane-link" onClick={onOpenPreview}>
-          Ouvrir dans un onglet
-        </button>
+        <div className="pane-header-actions">
+          {onToggleInspect ? (
+            <button
+              type="button"
+              className={inspect ? "inspect-toggle is-on" : "inspect-toggle"}
+              aria-pressed={inspect}
+              title="Activer ou couper l’inspecteur (Ctrl+Shift+E)"
+              onClick={onToggleInspect}
+            >
+              Inspecter
+              <kbd>Ctrl+Shift+E</kbd>
+            </button>
+          ) : null}
+          <button type="button" className="pane-link" onClick={onOpenPreview}>
+            Ouvrir dans un onglet
+          </button>
+        </div>
       </div>
       <div className="pane-body preview-body">
-        <PreviewFrame html={html} css={css} width={width} variant={touch ? "page" : "stage"} />
+        <PreviewFrame
+          ref={previewRef}
+          html={html}
+          css={css}
+          width={width}
+          variant={touch ? "page" : "stage"}
+          inspect={inspect}
+          highlight={highlight}
+          onHoverNode={onPreviewHover}
+          onSelectNode={onPreviewClick}
+        />
       </div>
     </section>
   );

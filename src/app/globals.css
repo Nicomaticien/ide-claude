@@ -324,6 +324,42 @@ body {
   color: var(--muted);
 }
 
+.pane-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.inspect-toggle {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+
+.inspect-toggle.is-on {
+  color: #d7ebff;
+  border-color: rgba(111, 168, 220, 0.75);
+  background: rgba(111, 168, 220, 0.18);
+}
+
+.inspect-toggle kbd {
+  margin-left: 6px;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0;
+  opacity: 0.75;
+}
+
 .pane-link {
   appearance: none;
   border: 0;
@@ -334,6 +370,16 @@ body {
   font-weight: 650;
   cursor: pointer;
   padding: 0;
+}
+
+.editor-root .cm-line.cm-inspect-primary {
+  background-color: rgba(111, 168, 220, 0.28) !important;
+  box-shadow: inset 3px 0 0 #6fa8dc;
+}
+
+.editor-root .cm-line.cm-inspect-related {
+  background-color: rgba(246, 178, 107, 0.2) !important;
+  box-shadow: inset 3px 0 0 #f6b26b;
 }
 
 .pane-link:hover {

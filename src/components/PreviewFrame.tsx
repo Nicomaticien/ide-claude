@@ -1,20 +1,59 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { composeDocument } from "@/lib/compose";
+import type { HighlightRequest } from "@/lib/inspect-link";
+import {
+  bindPreviewHover,
+  drawHighlight,
+  nodeIdsForSelector,
+  selectorMatchesNode,
+} from "@/lib/inspect-overlay";
 
-export function PreviewFrame({
-  html,
-  css,
-  width,
-  variant = "stage",
-}: {
-  html: string;
-  css: string;
-  width: string;
-  variant?: "stage" | "page";
-}) {
+export type PreviewInspectHandle = {
+  nodeIdsForSelector(selector: string): number[];
+  selectorMatchesNode(selector: string, nodeId: number): boolean;
+};
+
+export const PreviewFrame = forwardRef<
+  PreviewInspectHandle,
+  {
+    html: string;
+    css: string;
+    width: string;
+    variant?: "stage" | "page";
+    inspect?: boolean;
+    highlight?: HighlightRequest | null;
+    onHoverNode?: (nodeId: number | null) => void;
+    onSelectNode?: (nodeId: number) => void;
+  }
+>(function PreviewFrame(
+  { html, css, width, variant = "stage", inspect = false, highlight = null, onHoverNode, onSelectNode },
+  ref,
+) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const onHoverRef = useRef(onHoverNode);
+  const onSelectRef = useRef(onSelectNode);
+
+  useEffect(() => {
+    onHoverRef.current = onHoverNode;
+    onSelectRef.current = onSelectNode;
+  }, [onHoverNode, onSelectNode]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      nodeIdsForSelector(selector: string) {
+        const doc = iframeRef.current?.contentDocument;
+        return doc ? nodeIdsForSelector(doc, selector) : [];
+      },
+      selectorMatchesNode(selector: string, nodeId: number) {
+        const doc = iframeRef.current?.contentDocument;
+        return doc ? selectorMatchesNode(doc, selector, nodeId) : false;
+      },
+    }),
+    [],
+  );
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -37,6 +76,33 @@ export function PreviewFrame({
     paint();
   }, [html, css]);
 
+  useEffect(() => {
+    const doc = iframeRef.current?.contentDocument;
+    if (!doc || !inspect) {
+      if (doc?.documentElement) doc.documentElement.style.cursor = "";
+      return;
+    }
+    doc.documentElement.style.cursor = "crosshair";
+    const iframe = iframeRef.current;
+    const unbind = bindPreviewHover(
+      doc,
+      (nodeId) => onHoverRef.current?.(nodeId),
+      (nodeId) => onSelectRef.current?.(nodeId),
+    );
+    const onFrameLeave = () => onHoverRef.current?.(null);
+    iframe?.addEventListener("mouseleave", onFrameLeave);
+    return () => {
+      unbind();
+      iframe?.removeEventListener("mouseleave", onFrameLeave);
+    };
+  }, [html, css, inspect]);
+
+  useEffect(() => {
+    const doc = iframeRef.current?.contentDocument;
+    if (!doc) return;
+    drawHighlight(doc, inspect ? highlight : null);
+  }, [html, css, inspect, highlight]);
+
   return (
     <div className={variant === "page" ? "preview-page" : "preview-stage"}>
       <iframe
@@ -48,4 +114,4 @@ export function PreviewFrame({
       />
     </div>
   );
-}
+});
